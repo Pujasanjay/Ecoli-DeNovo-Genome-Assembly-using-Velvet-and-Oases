@@ -1,0 +1,345 @@
+E. COLI DE NOVO ASSEMBLY — README.txt
+====================================
+Dataset: NCBI SRA SRR21904868 (Illumina paired-end DNA reads)
+Purpose: Compare Velvet and Oases over eight k-mer sizes and report
+         the optimal assemblies and every selected sequence length.
+Platform: Indiana University Quartz HPC
+SLURM account: r00270
+Project directory: /N/slate/puthora/ecoli_assembly_assignment
+
+This README documents the analysis workflow and commands, checked against
+the six original Quartz shell scripts supplied by the author. Commands in
+sections 2-5 are taken from those scripts. Downstream analysis and export
+commands in sections 6-8 are documented from the existing project workflow.
+
+1. CONNECT TO QUARTZ
+--------------------
+From a local terminal:
+    ssh puthora@quartz.uits.iu.edu
+
+On Quartz:
+    cd /N/slate/puthora/ecoli_assembly_assignment
+
+All project data, scripts, results, and logs are in this Slate directory.
+
+2. DOWNLOAD THE DATA
+--------------------
+Original script: download_ecoli.sh
+SLURM: account r00270, partition general, QOS allocated,
+       4 CPUs, 16 GB RAM, 4-hour limit.
+
+The script loads SRA Toolkit 3.0.5 and downloads SRR21904868:
+
+    module load sra-toolkit/3.0.5
+    cd /N/slate/puthora/ecoli_assembly_assignment
+    mkdir -p raw_data/tmp
+    prefetch SRR21904868 \
+        --max-size u \
+        -O raw_data/SRR21904868
+
+The download script also attempted conversion using the SRA directory:
+
+    fasterq-dump raw_data/SRR21904868 \
+        --split-files \
+        --threads 4 \
+        --temp raw_data/tmp \
+        --outdir raw_data
+
+A separate conversion script, described below, uses the explicit .sra
+file path. The download script alone does not establish that its initial
+conversion attempt completed successfully.
+
+Submission command:
+    sbatch download_ecoli.sh
+
+3. CONVERT SRA TO COMPRESSED PAIRED FASTQ
+----------------------------------------
+Original script: convert_ecoli.sh
+SLURM: account r00270, partition general, QOS allocated,
+       4 CPUs, 16 GB RAM, 4-hour limit.
+
+Exact conversion and compression commands from the script:
+
+    module load sra-toolkit/3.0.5
+    cd /N/slate/puthora/ecoli_assembly_assignment
+    mkdir -p raw_data/tmp
+
+    fasterq-dump \
+        raw_data/SRR21904868/SRR21904868/SRR21904868.sra \
+        --split-files \
+        --threads 4 \
+        --temp raw_data/tmp \
+        --outdir raw_data
+
+    gzip -f raw_data/SRR21904868_1.fastq
+    gzip -f raw_data/SRR21904868_2.fastq
+
+Submission command:
+    sbatch convert_ecoli.sh
+
+Resulting paired reads:
+    raw_data/SRR21904868_1.fastq.gz
+    raw_data/SRR21904868_2.fastq.gz
+
+4. QUALITY CONTROL AND ADAPTER TRIMMING
+---------------------------------------
+A. Initial FastQC
+Original script: run_fastqc.sh
+SLURM: 4 CPUs, 8 GB RAM, 1-hour limit.
+The script uses "module load fastqc" (without a pinned version).
+The mkdir command below ensures that the qc output folder exists.
+
+    cd /N/slate/puthora/ecoli_assembly_assignment
+    module load fastqc
+    mkdir -p qc
+    fastqc \
+        --threads 4 \
+        --outdir qc \
+        raw_data/SRR21904868_1.fastq.gz \
+        raw_data/SRR21904868_2.fastq.gz
+
+Submission:
+    sbatch run_fastqc.sh
+
+B. Paired-end read trimming with fastp
+Original script: trim_ecoli.sh
+SLURM: 4 CPUs, 8 GB RAM, 2-hour limit.
+
+    cd /N/slate/puthora/ecoli_assembly_assignment
+    module load fastp/0.23.4
+    mkdir -p trimmed_data qc
+
+    fastp \
+        -i raw_data/SRR21904868_1.fastq.gz \
+        -I raw_data/SRR21904868_2.fastq.gz \
+        -o trimmed_data/SRR21904868_1.trimmed.fastq.gz \
+        -O trimmed_data/SRR21904868_2.trimmed.fastq.gz \
+        --detect_adapter_for_pe \
+        --thread 4 \
+        --html qc/fastp_report.html \
+        --json qc/fastp_report.json
+
+Submission:
+    sbatch trim_ecoli.sh
+
+Trimmed read files used for BOTH assemblers:
+    trimmed_data/SRR21904868_1.trimmed.fastq.gz
+    trimmed_data/SRR21904868_2.trimmed.fastq.gz
+
+5. VELVET AND OASES ASSEMBLIES
+-----------------------------
+Software installed in the project-local assembly_env directory.
+Original scripts:
+    run_assemblies.sh          k = 21, 31, 41, 51, 61
+    run_additional_kmers.sh    k = 71, 81, 91
+
+Both scripts request: SLURM account r00270, general partition,
+allocated QOS, 8 CPUs, 32 GB RAM, and a 12-hour time limit.
+
+Environment and inputs:
+    cd /N/slate/puthora/ecoli_assembly_assignment
+    export PATH="$PWD/assembly_env/bin:$PATH"
+    R1="trimmed_data/SRR21904868_1.trimmed.fastq.gz"
+    R2="trimmed_data/SRR21904868_2.trimmed.fastq.gz"
+    mkdir -p velvet_results oases_results reports
+
+Eight k-mer sizes were tested for each program:
+    21, 31, 41, 51, 61, 71, 81, 91
+Total configurations: 8 Velvet + 8 Oases = 16 assemblies.
+
+For each K, the Velvet script executes:
+    VDIR="velvet_results/k${K}"
+    /usr/bin/time -p -o "reports/velvet_k${K}_time.txt" \
+      bash -c '
+        velveth "$1" "$2" -shortPaired -fastq.gz -separate "$3" "$4"
+        velvetg "$1" -exp_cov auto -cov_cutoff auto
+      ' bash "$VDIR" "$K" "$R1" "$R2"
+
+For each K, the Oases script executes:
+    ODIR="oases_results/k${K}"
+    /usr/bin/time -p -o "reports/oases_k${K}_time.txt" \
+      bash -c '
+        velveth "$1" "$2" -shortPaired -fastq.gz -separate "$3" "$4"
+        velvetg "$1" -read_trkg yes -exp_cov auto
+        oases "$1"
+      ' bash "$ODIR" "$K" "$R1" "$R2"
+
+Submission commands used for the two batches:
+    sbatch run_assemblies.sh
+    sbatch run_additional_kmers.sh
+
+The additional-k-mer script checks whether an output directory already
+exists and exits rather than overwriting it. It was recorded as SLURM
+job 12291828, completed with exit code 0:0.
+
+Assembly outputs:
+    velvet_results/k{K}/contigs.fa
+    oases_results/k{K}/transcripts.fa
+
+Elapsed wall-clock seconds were recorded in:
+    reports/velvet_k{K}_time.txt
+    reports/oases_k{K}_time.txt
+
+IMPORTANT: Do not resubmit the scripts unless a new analysis is intended.
+
+6. COMPUTE ASSEMBLY STATISTICS
+------------------------------
+Project analysis scripts:
+    python analyze_assemblies.py
+    python analyze_all_kmers.py
+
+The eight-k-mer comparison was recorded at:
+    reports/assembly_comparison_all8.csv
+
+Metrics evaluated:
+    - Number of contigs or transcript-like sequences
+    - Total assembled sequence length (bp)
+    - Shortest and longest sequence (bp)
+    - N50 (bp)
+    - Elapsed runtime (seconds)
+
+Selected assemblies, based primarily on highest N50 within each tool:
+
+    Velvet, k=81
+        Sequences:       233 contigs
+        Total length:    4,783,798 bp
+        N50:             118,766 bp
+        Longest contig:  365,827 bp
+        Runtime:         238.97 seconds
+
+    Oases, k=51
+        Sequences:       538 transcript-like sequences
+        Total length:    16,354,338 bp
+        N50:             1,074,872 bp
+        Longest sequence:1,433,095 bp
+        Runtime:         428.68 seconds
+
+Velvet k=91 had fewer contigs than Velvet k=81, so k=81 is the
+selected optimum specifically under the N50 criterion, not every
+possible assembly-quality criterion.
+
+7. QUAST EVALUATION OF VELVET ASSEMBLIES
+---------------------------------------
+The project used a separate quast_env environment and the following
+reference-free QUAST command:
+
+    export PATH="$PWD/quast_env/bin:$PATH"
+    quast.py \
+        velvet_results/k21/contigs.fa \
+        velvet_results/k31/contigs.fa \
+        velvet_results/k41/contigs.fa \
+        velvet_results/k51/contigs.fa \
+        velvet_results/k61/contigs.fa \
+        velvet_results/k71/contigs.fa \
+        velvet_results/k81/contigs.fa \
+        velvet_results/k91/contigs.fa \
+        --labels k21,k31,k41,k51,k61,k71,k81,k91 \
+        --threads 4 \
+        --min-contig 0 \
+        -o reports/quast_velvet_all8
+
+Output directory:
+    reports/quast_velvet_all8
+
+No reference genome was supplied; therefore, reference-based assembly
+accuracy, misassemblies, and completeness cannot be established from
+this QUAST run.
+
+8. EXPORT EVERY SEQUENCE LENGTH FOR SELECTED ASSEMBLIES
+-------------------------------------------------------
+Project export scripts:
+    export_optimal_lengths.py
+    export_final_lengths.py
+
+The final sequence-length files correspond to:
+    Velvet: velvet_results/k81/contigs.fa
+    Oases:  oases_results/k51/transcripts.fa
+
+A standalone reproducible FASTA-to-TSV export is shown below. Run it
+from the project directory; copy the block without adding indentation:
+
+    mkdir -p reports
+
+
+python - <<'PYCODE'
+import csv
+
+pairs = [
+    ("velvet_results/k81/contigs.fa",
+     "reports/velvet_k81_sequence_lengths.tsv"),
+    ("oases_results/k51/transcripts.fa",
+     "reports/oases_k51_sequence_lengths.tsv"),
+]
+
+for fasta, output in pairs:
+    records = []
+    seq_id = None
+    length = 0
+
+    with open(fasta) as handle:
+        for line in handle:
+            if line.startswith(">"):
+                if seq_id is not None:
+                    records.append((seq_id, length))
+                seq_id = line[1:].strip().split()[0]
+                length = 0
+            else:
+                length += len(line.strip())
+        if seq_id is not None:
+            records.append((seq_id, length))
+
+    with open(output, "w", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerow(["Sequence_ID", "Length_bp"])
+        writer.writerows(records)
+
+    print(output, len(records), "sequences")
+PYCODE
+
+Expected TSV sizes:
+    velvet_k81_sequence_lengths.tsv: 233 data rows + 1 header
+    oases_k51_sequence_lengths.tsv: 538 data rows + 1 header
+
+To check:
+    wc -l reports/velvet_k81_sequence_lengths.tsv
+    wc -l reports/oases_k51_sequence_lengths.tsv
+
+Expected line counts: 234 and 539, respectively.
+
+9. TRANSFER RESULTS TO A LOCAL COMPUTER
+---------------------------------------
+Run these commands from a LOCAL Mac terminal, not a Quartz login shell:
+
+    scp puthora@quartz.uits.iu.edu:/N/slate/puthora/ecoli_assembly_assignment/reports/velvet_k81_sequence_lengths.tsv ~/Downloads/
+
+    scp puthora@quartz.uits.iu.edu:/N/slate/puthora/ecoli_assembly_assignment/reports/oases_k51_sequence_lengths.tsv ~/Downloads/
+
+10. SUBMISSION FILES
+--------------------
+Suggested submission filenames (rename the local downloads):
+
+    puthora_report.md
+    README.txt
+    velvet_k81_sequence_lengths.tsv
+    oases_k51_sequence_lengths.tsv
+
+The report contains the methodology, eight-k-mer comparisons for both
+assemblers, optimal parameter selections, interpretation, and an
+appendix listing every selected sequence length. The two TSVs supply
+the same sequence lengths in machine-readable form.
+
+INTERPRETATION AND REPRODUCIBILITY NOTES
+----------------------------------------
+- Velvet is a genome assembler; Oases is designed primarily for
+  transcriptome assembly. Oases output may contain overlapping or
+  redundant transcript-like paths.
+- The much larger Oases total length and N50 do NOT demonstrate that
+  Oases produces a better or more accurate E. coli genome assembly.
+- N50 describes sequence contiguity, not sequence correctness.
+- The six original shell scripts verify preprocessing and assembly
+  commands. They do not, on their own, verify every job's completion;
+  that requires logs, SLURM accounting, or resulting output files.
+- Commands for statistics, QUAST, and sequence-length export above
+  reflect the documented analysis workflow. The standalone export
+  block is provided as a reproducible equivalent, not claimed to be
+  a verbatim copy of export_final_lengths.py.
